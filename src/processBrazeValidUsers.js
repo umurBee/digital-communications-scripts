@@ -7,7 +7,7 @@ const currentDate = new Date();
 const formattedDate = currentDate.toISOString().split('T')[0];
 
 // Ensure the base export folder exists
-const baseExportFolder = path.join(__dirname, 'exports');
+const baseExportFolder = path.join(__dirname, '..', 'exports');
 ensureFolderExists(baseExportFolder);
 
 // Process the validUsers folder and create a CSV template with external_id

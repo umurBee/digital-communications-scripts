@@ -15,7 +15,7 @@ const clusters = {
 };
 
 // Ensure the export folder exists
-const exportFolder = './exports'; // Root folder for all exports (will use date and country structure)
+const exportFolder = 'exports'; // Root folder for all exports (will use date and country structure)
 
 // Ensure the export folder and its parent folders exist
 if (!fs.existsSync(exportFolder)) {
@@ -60,7 +60,7 @@ async function isFileReady(fileUrl) {
 }
 
 // Function to wait for file readiness
-async function waitForFile(url, maxAttempts = 30, interval = 5000) {
+async function waitForFile(url, maxAttempts = 30, interval = 20000) {
     console.log(`Waiting for Braze export to be ready...`);
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         if (await isFileReady(url)) {
@@ -158,29 +158,35 @@ async function exportUsersForCountry(countryCode, countryConfig, segmentName, se
 
 // Main function to run exports for each country and segment
 async function exportUsers() {
-    for (const [countryCode, countryConfig] of Object.entries(countries)) {
-        // Process each segment for the country
-        for (const [segmentName, segmentId] of Object.entries(countryConfig)) {
-            if (segmentName !== 'cluster' && segmentName !== 'apiKey') {
-                // Create the correct path under the date and country folder
-                const countryFolderPath = path.join(exportFolder, formattedDate, countryCode);  // Under the date and country
-                const brazeRawFolder = path.join(countryFolderPath, 'braze-raw');  // Under the braze-raw folder
+    const startTime = new Date();
+    console.log('Start Time:', startTime.toISOString());
 
-                // Ensure the country and braze-raw folder exist
-                if (!fs.existsSync(countryFolderPath)) {
-                    fs.mkdirSync(countryFolderPath, { recursive: true });
-                }
-                if (!fs.existsSync(brazeRawFolder)) {
-                    fs.mkdirSync(brazeRawFolder);
-                }
+    try {
+        for (const [countryCode, countryConfig] of Object.entries(countries)) {
+            for (const [segmentName, segmentId] of Object.entries(countryConfig)) {
+                if (segmentName !== 'cluster' && segmentName !== 'apiKey') {
+                    const countryFolderPath = path.join(exportFolder, formattedDate, countryCode);
+                    const brazeRawFolder = path.join(countryFolderPath, 'braze-raw');
 
-                // Call the export function
-                await exportUsersForCountry(countryCode, countryConfig, segmentName, segmentId);
+                    if (!fs.existsSync(countryFolderPath)) {
+                        fs.mkdirSync(countryFolderPath, { recursive: true });
+                    }
+                    if (!fs.existsSync(brazeRawFolder)) {
+                        fs.mkdirSync(brazeRawFolder);
+                    }
+
+                    await exportUsersForCountry(countryCode, countryConfig, segmentName, segmentId);
+                }
             }
         }
+    } catch (error) {
+        console.error('Error during export:', error);
+    } finally {
+        const endTime = new Date();
+        console.log('End Time:', endTime.toISOString());
+        console.log('Total Execution Time:', (endTime - startTime) / 1000, 'seconds');
     }
 }
-
 
 // Run the script
 exportUsers();

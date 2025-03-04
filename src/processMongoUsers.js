@@ -8,7 +8,7 @@ const currentDate = new Date();
 const formattedDate = currentDate.toISOString().split('T')[0];
 
 // Define the base export folder
-const baseExportFolder = path.join(__dirname, 'exports');
+const baseExportFolder = path.join(__dirname, '..', 'exports');
 
 // Function to process the user metadata CSV file for a given country
 async function processUserMetadata(countryCode) {

@@ -8,7 +8,7 @@ const currentDate = new Date();
 const formattedDate = currentDate.toISOString().split('T')[0];
 
 // Prepare the results folder
-const resultsDir = `./results/${formattedDate}`;
+const resultsDir = `results/${formattedDate}`;
 if (!fs.existsSync(resultsDir)) {
   fs.mkdirSync(resultsDir, { recursive: true });
   console.log(`Created results directory: ${resultsDir}`);
