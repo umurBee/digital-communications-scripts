@@ -10,17 +10,44 @@ const formattedDate = currentDate.toISOString().split('T')[0];
 const baseExportFolder = path.join(__dirname, '..', 'exports');
 ensureFolderExists(baseExportFolder);
 
+// Load valid user IDs from mongo-valid-users.csv
+async function loadValidMongoUsers(countryCode) {
+  const mongoFilePath = path.join(baseExportFolder, formattedDate, countryCode, 'mongo-processed', 'mongo-valid-users.csv');
+  
+  if (!fs.existsSync(mongoFilePath)) {
+    throw new Error(`Mongo valid users file not found for ${countryCode}: ${mongoFilePath}. Please run processMongoUsers.js first.`);
+  }
+
+  const validMongoUsers = new Set();
+  const rl = readline.createInterface({
+    input: fs.createReadStream(mongoFilePath),
+    output: process.stdout,
+    terminal: false
+  });
+
+  let firstLineSkipped = false;
+  for await (const line of rl) {
+    if (!firstLineSkipped) {
+      firstLineSkipped = true; // Skip header
+      continue;
+    }
+    validMongoUsers.add(line.trim());
+  }
+
+  return validMongoUsers;
+}
+
+
 // Process the validUsers folder and create a CSV template with external_id
 async function processValidUsers(countryCode) {
-  // Dynamically define the folder paths for each country
   const rawFolderPath = path.join(baseExportFolder, formattedDate, countryCode, 'braze-raw');
-  const processedFolderPath = path.join(baseExportFolder, formattedDate, countryCode, 'braze-processed'); // Remove country code folder
+  const processedFolderPath = path.join(baseExportFolder, formattedDate, countryCode, 'braze-processed');
+  const unknownUsersFilePath = path.join(processedFolderPath, 'unknown-users-braze.csv'); // File for unknown users
 
-  // Ensure the processed folder exists
   ensureFolderExists(processedFolderPath);
 
   const validUsersFolderPath = path.join(rawFolderPath, 'validUsers');
-  const processedFilePath = path.join(processedFolderPath, `braze-valid-users.csv`); // Save directly under braze-processed
+  const processedFilePath = path.join(processedFolderPath, `braze-valid-users.csv`);
 
   const files = await getTxtFiles(validUsersFolderPath);
   if (files.length === 0) {
@@ -28,13 +55,34 @@ async function processValidUsers(countryCode) {
     return;
   }
 
+  const validMongoUsers = await loadValidMongoUsers(countryCode);
   let externalIds = [];
+  let unknownIds = [];
 
   // Stream and process files line by line
   for (const file of files) {
     const filePath = path.join(validUsersFolderPath, file);
     const ids = await streamFileAndExtractExternalIds(filePath);
-    externalIds = [...externalIds, ...ids];
+
+    ids.forEach(id => {
+      if (validMongoUsers.has(id)) {
+        externalIds.push(id);
+      } else {
+        unknownIds.push(id);
+      }
+    });
+  }
+
+  // Write unknown externalIds to a separate file
+  if (unknownIds.length > 0) {
+    const unknownContent = unknownIds.join('\n') + '\n';
+    fs.writeFileSync(unknownUsersFilePath, unknownContent, 'utf8');
+    console.log(`Unknown users saved to ${unknownUsersFilePath}`);
+  }
+
+  if (externalIds.length === 0) {
+    console.log(`No valid externalIds found in ${countryCode}, skipping further processing.`);
+    return;
   }
 
   // Prepare the CSV content with header
@@ -42,11 +90,11 @@ async function processValidUsers(countryCode) {
   const rows = externalIds.map(id => `${id},FALSE,FALSE,FALSE,FALSE`).join('\n');
   const csvContent = header + rows;
 
-  // Write the initial CSV with only the valid external_ids and default FALSE values
+  // Write the initial CSV with only the valid external_ids
   fs.writeFileSync(processedFilePath, csvContent, 'utf8');
   console.log(`Processed CSV file saved to ${processedFilePath}`);
 
-  // After the initial file, update it with TRUE/FALSE values based on the other folders
+  // Update it with TRUE/FALSE values based on the other folders
   await updateUserDataWithAvailability(externalIds, countryCode, processedFilePath);
 }
 
@@ -73,56 +121,62 @@ function streamFileAndExtractExternalIds(filePath) {
 }
 
 // Check if external_ids exist in other folders and update the final CSV
+// Check if external_ids exist in other folders and update the final CSV
 async function updateUserDataWithAvailability(externalIds, countryCode, processedFilePath) {
   const foldersToCheck = ['emailAvailableUsers', 'phoneAvailableUsers', 'inAppAvailableUsers', 'pushAvailableUsers'];
 
-  // Read the existing CSV file data
   let finalData = fs.readFileSync(processedFilePath, 'utf8').split('\n');
+  
+  // Update header to include 'Reachable' column
+  finalData[0] = 'external_id,emailAvailable,phoneAvailable,inAppAvailable,pushAvailable,Reachable';
 
-  // Use Promise.all() to process folders in parallel for better performance
-  const folderPromises = foldersToCheck.map(async (folder) => {
-    const rawFolderPath = path.join(baseExportFolder, formattedDate, countryCode, 'braze-raw');
-    const folderPath = path.join(rawFolderPath, folder);
+  // Use Promise.all() to process folders in parallel
+  await Promise.all(foldersToCheck.map(async (folder) => {
+    const folderPath = path.join(baseExportFolder, formattedDate, countryCode, 'braze-raw', folder);
     console.log(`Checking folder: ${folderPath}`);
 
     const files = await getTxtFiles(folderPath);
     const availableIds = new Set();
 
     // Collect all external_ids in the folder by streaming files
-    const fileReads = files.map(async (file) => {
+    await Promise.all(files.map(async (file) => {
       const filePath = path.join(folderPath, file);
       const ids = await streamFileAndExtractExternalIds(filePath);
       ids.forEach(id => availableIds.add(id));
-    });
-
-    // Wait for all file reads to finish
-    await Promise.all(fileReads);
+    }));
 
     console.log(`Found ${availableIds.size} IDs in ${folder}`);
 
     // Update the finalData rows for each external_id
     finalData = finalData.map((line, index) => {
+      if (index === 0) return line; // Skip header
+
       const [external_id, emailAvailable, phoneAvailable, inAppAvailable, pushAvailable] = line.split(',');
-      if (externalIds.includes(external_id)) {
-        if (availableIds.has(external_id)) {
-          // Set the appropriate column to TRUE
-          const updatedRow = {
-            external_id,
-            emailAvailable: folder === 'emailAvailableUsers' ? 'TRUE' : emailAvailable,
-            phoneAvailable: folder === 'phoneAvailableUsers' ? 'TRUE' : phoneAvailable,
-            inAppAvailable: folder === 'inAppAvailableUsers' ? 'TRUE' : inAppAvailable,
-            pushAvailable: folder === 'pushAvailableUsers' ? 'TRUE' : pushAvailable,
-          };
 
-          return `${updatedRow.external_id},${updatedRow.emailAvailable},${updatedRow.phoneAvailable},${updatedRow.inAppAvailable},${updatedRow.pushAvailable}`;
-        }
+      if (externalIds.includes(external_id) && availableIds.has(external_id)) {
+        return [
+          external_id,
+          folder === 'emailAvailableUsers' ? 'TRUE' : emailAvailable,
+          folder === 'phoneAvailableUsers' ? 'TRUE' : phoneAvailable,
+          folder === 'inAppAvailableUsers' ? 'TRUE' : inAppAvailable,
+          folder === 'pushAvailableUsers' ? 'TRUE' : pushAvailable,
+        ].join(',');
       }
-      return line; // No change if the external_id isn't found in this folder
+      return line;
     });
-  });
+  }));
 
-  // Wait for all folder checks to finish
-  await Promise.all(folderPromises);
+  // After updating channel availability, add Reachable column
+  finalData = finalData.map((line, index) => {
+    if (index === 0) return line; // Skip header
+
+    const [external_id, emailAvailable, phoneAvailable, inAppAvailable, pushAvailable] = line.split(',');
+
+    // Determine if at least one communication method is available
+    const reachable = [emailAvailable, phoneAvailable, inAppAvailable, pushAvailable].includes('TRUE') ? 'TRUE' : 'FALSE';
+
+    return `${external_id},${emailAvailable},${phoneAvailable},${inAppAvailable},${pushAvailable},${reachable}`;
+  });
 
   // Write the updated data back to the CSV
   fs.writeFileSync(processedFilePath, finalData.join('\n'), 'utf8');
@@ -140,11 +194,10 @@ function getTxtFiles(folderPath) {
   return new Promise((resolve, reject) => {
     fs.readdir(folderPath, (err, files) => {
       if (err) {
-        reject(err);
+        resolve([]); // Return empty array if folder doesn't exist
         return;
       }
-      const txtFiles = files.filter(file => file.endsWith('.txt'));
-      resolve(txtFiles);
+      resolve(files.filter(file => file.endsWith('.txt')));
     });
   });
 }

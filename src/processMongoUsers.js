@@ -7,8 +7,12 @@ const readline = require('readline');  // Use readline to stream the files line 
 const currentDate = new Date();
 const formattedDate = currentDate.toISOString().split('T')[0];
 
-// Define the base export folder
+// Define the base export and results folders
 const baseExportFolder = path.join(__dirname, '..', 'exports');
+const resultsFolder = path.join(__dirname, '..', 'results', formattedDate);
+
+// Ensure the results folder exists
+ensureFolderExists(resultsFolder);
 
 // Function to process the user metadata CSV file for a given country
 async function processUserMetadata(countryCode) {
@@ -20,10 +24,8 @@ async function processUserMetadata(countryCode) {
   ensureFolderExists(processedFolderPath);
 
   const inputFilePath = path.join(rawFolderPath, `user-metadata-${countryCode}.csv`);
-  const outputFilePath = path.join(processedFolderPath, `mongo-valid-users.csv`);
-
-  // Ensure country-specific folder exists
-  ensureFolderExists(processedFolderPath);
+  const resultFilePath = path.join(resultsFolder, `${countryCode}-result.csv`);
+  const outputFilePath = path.join(processedFolderPath, 'mongo-valid-users.csv');
 
   if (!fs.existsSync(inputFilePath)) {
     console.log(`No CSV file found for country: ${countryCode}`);
@@ -37,22 +39,45 @@ async function processUserMetadata(countryCode) {
     terminal: false
   });
 
-  let outputData = [];  // Initialize with header
+  const valueUserMap = new Map();  // Store unique values with a set of userIds
+  const concatenatedData = ['value_userId'];  // Store concatenated value_userId pairs
 
+  let isHeader = true; // Skip the header
   rl.on('line', (line) => {
-    if (line.trim()) {
-      const [id, userId, value] = line.split(',');
-
-      // Concatenate value and userId with an underscore
-      const beesId = `${value}_${userId}`;
-      outputData.push(beesId);
+    if (isHeader) {
+      isHeader = false;
+      return; // Skip the first line (header)
     }
+
+    const parts = line.split(','); // Input file uses commas as delimiters
+    if (parts.length < 3) return; // Ensure we have at least 3 columns (_id, userId, value)
+
+    const [, userId, value] = parts.map(item => item.trim()); // Trim whitespace
+
+    // Store concatenated value_userId for the second CSV
+    concatenatedData.push(`${value}_${userId}`);
+
+    // Store userId count per value
+    if (!valueUserMap.has(value)) {
+      valueUserMap.set(value, new Set());
+    }
+    valueUserMap.get(value).add(userId);
   });
 
   rl.on('close', () => {
-    // Write the processed data to the output CSV file
-    fs.writeFileSync(outputFilePath, outputData.join('\n'), 'utf8');
-    console.log(`Processed CSV file saved to ${outputFilePath}`);
+    // Prepare the data for value-user count result file
+    const resultData = ['value,userCount'];
+    valueUserMap.forEach((userIds, value) => {
+      resultData.push(`${value},${userIds.size}`);
+    });
+
+    // Write the processed data to the results folder
+    fs.writeFileSync(resultFilePath, resultData.join('\n'), 'utf8');
+    console.log(`Result CSV file saved to ${resultFilePath}`);
+
+    // Write the concatenated data to the mongo-valid-users.csv file
+    fs.writeFileSync(outputFilePath, concatenatedData.join('\n'), 'utf8');
+    console.log(`Processed valid users CSV file saved to ${outputFilePath}`);
   });
 }
 

@@ -14,20 +14,13 @@ if (!fs.existsSync(resultsDir)) {
   console.log(`Created results directory: ${resultsDir}`);
 }
 
-// Prepare the summary file path
+// Prepare the summary file
 const summaryFilePath = `${resultsDir}/summary.csv`;
-
-// Check if the summary file exists
-let summaryStream;
-if (!fs.existsSync(summaryFilePath)) {
-  // If the file doesn't exist, create it and write the header
-  summaryStream = fs.createWriteStream(summaryFilePath);
-  summaryStream.write('country,mongousercount,reachablecount,reachablebyPhonecount,reachablebyEmailcount,reachablebyPushcount,reachablebyInAppCount\n');
-  console.log(`Created summary file at ${summaryFilePath}`);
-} else {
-  // If the file exists, open it in append mode
-  summaryStream = fs.createWriteStream(summaryFilePath, { flags: 'a' });
-}
+let summaryStream = fs.createWriteStream(summaryFilePath);
+summaryStream.write(
+  'country,totalMongoAccounts,reachableAccounts,emailAvailableAccounts,phoneAvailableAccounts,inAppAvailableAccounts,pushAvailableAccounts\n'
+);
+console.log(`Created summary file at ${summaryFilePath}`);
 
 // Iterate through all countries in countries.js
 for (const countryCode in countries) {
@@ -35,6 +28,7 @@ for (const countryCode in countries) {
 
   const mongoFilePath = `exports/${formattedDate}/${countryCode}/mongo-processed/mongo-valid-users.csv`;
   const brazeFilePath = `exports/${formattedDate}/${countryCode}/braze-processed/braze-valid-users.csv`;
+  const resultFilePath = `${resultsDir}/${countryCode}-result.csv`;
 
   // Check if the input files exist
   if (!fs.existsSync(mongoFilePath) || !fs.existsSync(brazeFilePath)) {
@@ -46,131 +40,180 @@ for (const countryCode in countries) {
   console.log(`Mongo: ${mongoFilePath}`);
   console.log(`Braze: ${brazeFilePath}`);
 
-  // Create writable streams for result files
-  const resultStream = fs.createWriteStream(`${resultsDir}/${countryCode}-result.csv`);
-  const invalidStream = fs.createWriteStream(`${resultsDir}/${countryCode}-braze-invalid-users.csv`);
+  processFiles(countryCode, mongoFilePath, brazeFilePath, resultFilePath);
+}
 
-  // Write the headers to the result files
-  resultStream.write('external_id,emailAvailable,phoneAvailable,inAppAvailable,pushAvailable,Reachable\n');
-  invalidStream.write('external_id\n'); // Only external_id for invalid users
+function processFiles(countryCode, mongoFilePath, brazeFilePath, resultFilePath) {
+  const mongoAccounts = new Map(); // Store unique accountIds and counts from Mongo
+  const reachableAccounts = new Set();
+  const emailAvailableAccounts = new Set();
+  const phoneAvailableAccounts = new Set();
+  const inAppAvailableAccounts = new Set();
+  const pushAvailableAccounts = new Set();
 
-  // Read Mongo CSV and populate the set with user IDs
-  const mongoUserIds = new Set();
-  let mongoUserCount = 0; // Counter for Mongo rows
+  // Read Mongo file
   fs.createReadStream(mongoFilePath)
     .pipe(csv())
     .on('data', (row) => {
-      mongoUserIds.add(row.value_userId);
-      mongoUserCount++;
+      const valueUserId = row.value_userId;
+      if (!valueUserId) return;
+
+      // Extract the first portion (accountId before '_')
+      const accountId = valueUserId.split('_')[0];
+      if (!mongoAccounts.has(accountId)) {
+        mongoAccounts.set(accountId, 0);
+      }
+      mongoAccounts.set(accountId, mongoAccounts.get(accountId) + 1);
     })
     .on('end', () => {
-      console.log(`Mongo users for ${countryCode} loaded. Total rows: ${mongoUserCount}`);
-      processBrazeFile(countryCode, mongoUserIds, brazeFilePath, resultStream, invalidStream, mongoUserCount);
+      console.log(`Mongo accounts loaded for ${countryCode}: ${mongoAccounts.size}`);
+      processBrazeFile(countryCode, mongoAccounts, brazeFilePath, resultFilePath, {
+        reachableAccounts,
+        emailAvailableAccounts,
+        phoneAvailableAccounts,
+        inAppAvailableAccounts,
+        pushAvailableAccounts,
+      });
     });
 }
 
-function processBrazeFile(countryCode, mongoUserIds, brazeFilePath, resultStream, invalidStream, mongoUserCount) {
-  const invalidBrazeUsers = [];
-  let brazeUserCount = 0; // Counter for Braze rows
-  let validUserCount = 0; // Counter for valid users written to resultStream
-  let invalidUserCount = 0; // Counter for invalid users written to invalidStream
+function processBrazeFile(countryCode, mongoAccounts, brazeFilePath, resultFilePath, trackingSets) {
+  const {
+    reachableAccounts,
+    emailAvailableAccounts,
+    phoneAvailableAccounts,
+    inAppAvailableAccounts,
+    pushAvailableAccounts,
+  } = trackingSets;
 
-  const brazeUsers = {}; // Store Braze users by their external_id
-  let reachableCount = 0;
-  let reachableByPhoneCount = 0;
-  let reachableByEmailCount = 0;
-  let reachableByPushCount = 0;
-  let reachableByInAppCount = 0;  // New count for inApp users
+  const brazeUserCounts = new Map();
 
   fs.createReadStream(brazeFilePath)
     .pipe(csv())
     .on('data', (row) => {
-      brazeUserCount++;
-      const mongoUserId = row.external_id;
-      brazeUsers[mongoUserId] = row; // Store the Braze user by external_id
-    })
-    .on('end', () => {
-      console.log(`Braze users for ${countryCode} processed. Total rows: ${brazeUserCount}`);
+      const externalId = row.external_id;
+      if (!externalId) return;
 
-      // First, upload all Mongo users with N/A channels and calculate reachability
-      mongoUserIds.forEach((mongoUserId) => {
-        const brazeUser = brazeUsers[mongoUserId];
-        let emailAvailable = 'N/A';
-        let phoneAvailable = 'N/A';
-        let inAppAvailable = 'N/A';
-        let pushAvailable = 'N/A';
-        let reachable = 'FALSE'; // Default reachable value
+      // Extract first portion (accountId before '_')
+      const accountId = externalId.split('_')[0];
 
-        // If the Mongo user exists in Braze, populate TRUE/FALSE values
-        if (brazeUser) {
-          emailAvailable = brazeUser.emailAvailable;
-          phoneAvailable = brazeUser.phoneAvailable;
-          inAppAvailable = brazeUser.inAppAvailable;
-          pushAvailable = brazeUser.pushAvailable;
-
-          // Update reachable if any channel is TRUE
-          reachable =
-            emailAvailable === 'TRUE' ||
-            phoneAvailable === 'TRUE' ||
-            inAppAvailable === 'TRUE' ||
-            pushAvailable === 'TRUE'
-              ? 'TRUE'
-              : 'FALSE';
-        }
-
-        // Update counts for reachability
-        if (reachable === 'TRUE') {
-          reachableCount++;
-        }
-        if (phoneAvailable === 'TRUE') {
-          reachableByPhoneCount++;
-        }
-        if (emailAvailable === 'TRUE') {
-          reachableByEmailCount++;
-        }
-        if (pushAvailable === 'TRUE') {
-          reachableByPushCount++;
-        }
-        if (inAppAvailable === 'TRUE') {  // Count users reachable by InApp
-          reachableByInAppCount++;
-        }
-
-        // Write the Mongo user to the result file
-        resultStream.write(`${mongoUserId},${emailAvailable},${phoneAvailable},${inAppAvailable},${pushAvailable},${reachable}\n`);
-        validUserCount++;
-      });
-
-      // Now, look for invalid Braze users (those who are in Braze but not in Mongo)
-      for (const brazeUserId in brazeUsers) {
-        if (!mongoUserIds.has(brazeUserId)) {
-          invalidBrazeUsers.push(brazeUserId);
-          invalidUserCount++;
-        }
+      if (!brazeUserCounts.has(accountId)) {
+        brazeUserCounts.set(accountId, {
+          brazeUserCount: 0,
+          emailReachableCount: 0,
+          phoneReachableCount: 0,
+          inAppReachableCount: 0,
+          pushReachableCount: 0,
+          reachableCount: 0,
+        });
       }
 
-      // Write invalid Braze users to the invalid file
-      invalidBrazeUsers.forEach((userId) => {
-        invalidStream.write(`${userId}\n`);
-      });
+      const accStats = brazeUserCounts.get(accountId);
+      accStats.brazeUserCount++;
 
-      // Close the writable streams after all data is written
-      resultStream.end(() => {
-        console.log(`${countryCode}-result.csv written successfully.`);
-      });
-      invalidStream.end(() => {
-        console.log(`${countryCode}-braze-invalid-users.csv written successfully.`);
-      });
+      const isEmailAvailable = row.emailAvailable === 'TRUE';
+      const isPhoneAvailable = row.phoneAvailable === 'TRUE';
+      const isInAppAvailable = row.inAppAvailable === 'TRUE';
+      const isPushAvailable = row.pushAvailable === 'TRUE';
 
-      console.log(`Files for ${countryCode} successfully saved.`);
-      console.log(`Valid users written: ${validUserCount}`);
-      console.log(`Invalid users written: ${invalidUserCount}`);
-
-      // Write to the daily summary report
-      summaryStream.write(
-        `${countryCode},${mongoUserCount},${reachableCount},${reachableByPhoneCount},${reachableByEmailCount},${reachableByPushCount},${reachableByInAppCount}\n`
-      );
+      if (isEmailAvailable || isPhoneAvailable || isInAppAvailable || isPushAvailable) {
+        accStats.reachableCount++;
+        reachableAccounts.add(accountId);
+      }
+      if (isEmailAvailable) {
+        accStats.emailReachableCount++;
+        emailAvailableAccounts.add(accountId);
+      }
+      if (isPhoneAvailable) {
+        accStats.phoneReachableCount++;
+        phoneAvailableAccounts.add(accountId);
+      }
+      if (isInAppAvailable) {
+        accStats.inAppReachableCount++;
+        inAppAvailableAccounts.add(accountId);
+      }
+      if (isPushAvailable) {
+        accStats.pushReachableCount++;
+        pushAvailableAccounts.add(accountId);
+      }
+    })
+    .on('end', () => {
+      console.log(`Braze data processed for ${countryCode}`);
+      updateResultsFile(countryCode, mongoAccounts, brazeUserCounts, resultFilePath);
+      updateSummaryFile(countryCode, mongoAccounts, trackingSets);
     })
     .on('error', (err) => {
       console.error(`Error processing Braze file for ${countryCode}:`, err);
     });
+}
+
+function updateResultsFile(countryCode, mongoAccounts, brazeUserCounts, resultFilePath) {
+  const accountStats = new Map();
+
+  // Initialize with Mongo data
+  mongoAccounts.forEach((count, accountId) => {
+    accountStats.set(accountId, {
+      userCount: count,
+      brazeUserCount: 0,
+      emailReachableCount: 0,
+      phoneReachableCount: 0,
+      inAppReachableCount: 0,
+      pushReachableCount: 0,
+      reachableCount: 0,
+    });
+  });
+
+  // Merge Braze data
+  brazeUserCounts.forEach((brazeStats, accountId) => {
+    if (accountStats.has(accountId)) {
+      const mongoData = accountStats.get(accountId);
+      mongoData.brazeUserCount = brazeStats.brazeUserCount;
+      mongoData.emailReachableCount = brazeStats.emailReachableCount;
+      mongoData.phoneReachableCount = brazeStats.phoneReachableCount;
+      mongoData.inAppReachableCount = brazeStats.inAppReachableCount;
+      mongoData.pushReachableCount = brazeStats.pushReachableCount;
+      mongoData.reachableCount = brazeStats.reachableCount;
+    } else {
+      accountStats.set(accountId, {
+        userCount: 0,
+        brazeUserCount: brazeStats.brazeUserCount,
+        emailReachableCount: brazeStats.emailReachableCount,
+        phoneReachableCount: brazeStats.phoneReachableCount,
+        inAppReachableCount: brazeStats.inAppReachableCount,
+        pushReachableCount: brazeStats.pushReachableCount,
+        reachableCount: brazeStats.reachableCount,
+      });
+    }
+  });
+
+  // Write new results file
+  const resultStream = fs.createWriteStream(resultFilePath);
+  resultStream.write(
+    'value,userCount,brazeUserCount,emailReachableCount,phoneReachableCount,inAppReachableCount,pushReachableCount,reachableCount\n'
+  );
+
+  accountStats.forEach((stats, accountId) => {
+    resultStream.write(
+      `${accountId},${stats.userCount},${stats.brazeUserCount},${stats.emailReachableCount},${stats.phoneReachableCount},${stats.inAppReachableCount},${stats.pushReachableCount},${stats.reachableCount}\n`
+    );
+  });
+
+  resultStream.end();
+  console.log(`Updated results file for ${countryCode}: ${resultFilePath}`);
+}
+
+function updateSummaryFile(countryCode, mongoAccounts, trackingSets) {
+  const {
+    reachableAccounts,
+    emailAvailableAccounts,
+    phoneAvailableAccounts,
+    inAppAvailableAccounts,
+    pushAvailableAccounts,
+  } = trackingSets;
+
+  summaryStream.write(
+    `${countryCode},${mongoAccounts.size},${reachableAccounts.size},${emailAvailableAccounts.size},${phoneAvailableAccounts.size},${inAppAvailableAccounts.size},${pushAvailableAccounts.size}\n`
+  );
+
+  console.log(`Summary updated for ${countryCode}`);
 }
