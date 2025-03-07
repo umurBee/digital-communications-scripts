@@ -18,9 +18,10 @@ if (!fs.existsSync(resultsDir)) {
 const summaryFilePath = `${resultsDir}/summary.csv`;
 let summaryStream = fs.createWriteStream(summaryFilePath);
 summaryStream.write(
-  'country,totalMongoAccounts,reachableAccounts,emailAvailableAccounts,phoneAvailableAccounts,inAppAvailableAccounts,pushAvailableAccounts\n'
+  'country,totalMongoAccounts,reachableAccounts,unreachableAccounts,reachabilityRate,emailAvailableAccounts,phoneAvailableAccounts,inAppAvailableAccounts,pushAvailableAccounts\n'
 );
 console.log(`Created summary file at ${summaryFilePath}`);
+let summaryData = [];
 
 // Iterate through all countries in countries.js
 for (const countryCode in countries) {
@@ -42,6 +43,33 @@ for (const countryCode in countries) {
 
   processFiles(countryCode, mongoFilePath, brazeFilePath, resultFilePath);
 }
+
+// Ensure this runs after all countries are processed
+setTimeout(() => {
+  if (summaryData.length === 0) {
+    console.log('No data to write in summary file.');
+    return;
+  }
+
+  // Sort by reachability rate in descending order
+  summaryData.sort((a, b) => b.reachabilityRate - a.reachabilityRate);
+
+  // Write sorted data to the summary file
+  let summaryStream = fs.createWriteStream(summaryFilePath);
+  summaryStream.write(
+    'country,totalMongoAccounts,reachableAccounts,unreachableAccounts,reachabilityRate,emailAvailableAccounts,phoneAvailableAccounts,inAppAvailableAccounts,pushAvailableAccounts\n'
+  );
+
+  summaryData.forEach(entry => {
+    summaryStream.write(
+      `${entry.countryCode},${entry.totalMongoAccounts},${entry.totalReachableAccounts},${entry.totalUnreachableAccounts},${entry.reachabilityRate},${entry.emailAvailable},${entry.phoneAvailable},${entry.inAppAvailable},${entry.pushAvailable}\n`
+    );
+  });
+
+  summaryStream.end();
+  console.log('Final summary file written successfully.');
+}, 5000);
+
 
 function processFiles(countryCode, mongoFilePath, brazeFilePath, resultFilePath) {
   const mongoAccounts = new Map(); // Store unique accountIds and counts from Mongo
@@ -211,9 +239,21 @@ function updateSummaryFile(countryCode, mongoAccounts, trackingSets) {
     pushAvailableAccounts,
   } = trackingSets;
 
-  summaryStream.write(
-    `${countryCode},${mongoAccounts.size},${reachableAccounts.size},${emailAvailableAccounts.size},${phoneAvailableAccounts.size},${inAppAvailableAccounts.size},${pushAvailableAccounts.size}\n`
-  );
+  const totalMongoAccounts = mongoAccounts.size;
+  const totalReachableAccounts = reachableAccounts.size;
+  const totalUnreachableAccounts = totalMongoAccounts - totalReachableAccounts;
+  const reachabilityRate = totalMongoAccounts > 0 ? (totalReachableAccounts / totalMongoAccounts).toFixed(4) : 0;
 
-  console.log(`Summary updated for ${countryCode}`);
+  summaryData.push({
+    countryCode,
+    totalMongoAccounts,
+    totalReachableAccounts,
+    totalUnreachableAccounts,
+    reachabilityRate,
+    emailAvailable: emailAvailableAccounts.size,
+    phoneAvailable: phoneAvailableAccounts.size,
+    inAppAvailable: inAppAvailableAccounts.size,
+    pushAvailable: pushAvailableAccounts.size,
+  });
 }
+
